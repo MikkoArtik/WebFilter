@@ -4,6 +4,7 @@ import asyncio
 from bs4 import BeautifulSoup
 
 import aiohttp
+import aiofiles
 
 import pymorphy2
 
@@ -12,7 +13,11 @@ from adapters.inosmi_ru import sanitize
 from text_tools import split_by_words, calculate_jaundice_rate
 
 
-NEWS_SITES = ('https://inosmi.ru')
+NEWS_SITES = ('https://inosmi.ru', )
+NEGATIVE_VOC_LINK = 'https://sociation.org/words/negative/'
+NEGATIVE_VOC_FILE = './charged_dict/negative_words.txt'
+
+FILE_SOURCE, URL_SOURCE = 0, 1
 
 
 class BadResponse(Exception):
@@ -20,6 +25,10 @@ class BadResponse(Exception):
 
 
 class InvalidNewsLink(Exception):
+    pass
+
+
+class InvalidSourceType(Exception):
     pass
 
 
@@ -31,8 +40,7 @@ def is_news_link(url_link: str) -> bool:
         return False
 
 
-async def load_negative_words() -> List[str]:
-    url = 'https://sociation.org/words/negative/'
+async def get_negative_words_from_url(url=NEGATIVE_VOC_LINK) -> List[str]:
     vocabulary = []
     async with aiohttp.ClientSession() as session_ctx:
         async with session_ctx.get(url) as response_ctx:
@@ -49,12 +57,21 @@ async def load_negative_words() -> List[str]:
     return vocabulary
 
 
+async def get_negative_words_from_file(fpath=NEGATIVE_VOC_FILE) -> List[str]:
+    vocabulary = []
+    async with aiofiles.open(fpath, 'r') as file_ctx:
+        async for line in file_ctx:
+            vocabulary.append(line.rstrip())
+    return vocabulary
+
+
 class MyScraper:
-    def __init__(self, news_link: str):
+    def __init__(self, news_link: str, vocabulary_source=FILE_SOURCE):
         if not is_news_link(news_link):
             raise InvalidNewsLink
 
         self.__news_link = news_link
+        self.__vocabulary_source = vocabulary_source
         self.__bad_vocabulary = []
         self.__analyser = pymorphy2.MorphAnalyzer()
 
@@ -63,9 +80,17 @@ class MyScraper:
         return self.__news_link
 
     @property
-    async def bad_vocabulary(self) -> List[str]:
+    def vocabulary_source(self) -> int:
+        return self.__vocabulary_source
+
+    async def get_bad_vocabulary(self) -> List[str]:
         if not self.__bad_vocabulary:
-            self.__bad_vocabulary = await load_negative_words()
+            if self.vocabulary_source == FILE_SOURCE:
+                self.__bad_vocabulary = await get_negative_words_from_file()
+            elif self.vocabulary_source == URL_SOURCE:
+                self.__bad_vocabulary = await get_negative_words_from_url()
+            else:
+                raise InvalidSourceType
         return self.__bad_vocabulary
 
     @property
@@ -82,7 +107,7 @@ class MyScraper:
     async def get_rating(self) -> Tuple[float, int]:
         news_body = await self.scrap_news_page()
         news_words = split_by_words(self.analyser, news_body)
-        bad_words = await self.bad_vocabulary
+        bad_words = await self.get_bad_vocabulary()
         rate = calculate_jaundice_rate(article_words=news_words,
                                        charged_words=bad_words)
         return rate, len(news_words)
@@ -91,7 +116,7 @@ class MyScraper:
 async def main():
     link = 'https://inosmi.ru/politic/20211013/250695120.html'
 
-    scraper = MyScraper(news_link=link)
+    scraper = MyScraper(news_link=link, vocabulary_source=URL_SOURCE)
     rate, count = await scraper.get_rating()
     print(rate, count)
 
